@@ -282,6 +282,9 @@ int main() {
 	mPSP2MapKey(&runner.params.keyMap, SCE_CTRL_SQUARE, mGUI_INPUT_SCREEN_MODE);
 
 	scePowerSetArmClockFrequency(444);
+	scePowerSetBusClockFrequency(222);
+	scePowerSetGpuClockFrequency(222);
+	scePowerSetGpuXbarClockFrequency(166);
 
 	if (mGUIGetRom(&runner, initialPath, sizeof(initialPath))) {
 		mGUILoadInputMaps(&runner);

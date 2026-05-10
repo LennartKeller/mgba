@@ -106,6 +106,19 @@ void mPSP2MapKey(struct mInputMap* map, int pspKey, int key) {
 	mInputBindKey(map, PSP2_INPUT, __builtin_ctz(pspKey), key);
 }
 
+static void _updateTextureFilters(void) {
+	SceGxmTextureFilter minFilter = blurry ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT;
+	if (tex[0]) {
+		vita2d_texture_set_filters(tex[0], SCE_GXM_TEXTURE_FILTER_LINEAR, minFilter);
+	}
+	if (tex[1]) {
+		vita2d_texture_set_filters(tex[1], SCE_GXM_TEXTURE_FILTER_LINEAR, minFilter);
+	}
+	if (screenshot) {
+		vita2d_texture_set_filters(screenshot, SCE_GXM_TEXTURE_FILTER_LINEAR, minFilter);
+	}
+}
+
 static THREAD_ENTRY _audioThread(void* context) {
 	struct mPSP2AudioContext* audio = (struct mPSP2AudioContext*) context;
 	const int16_t zeroBuffer[PSP2_SAMPLES * 2] __attribute__((__aligned__(64))) = {0};
@@ -389,6 +402,7 @@ void mPSP2Setup(struct mGUIRunner* runner) {
 	}
 	mCoreConfigGetBoolValue(&runner->config, "sgb.borderCrop", &sgbCrop);
 	mCoreConfigGetBoolValue(&runner->config, "filtering", &blurry);
+	_updateTextureFilters();
 }
 
 void mPSP2LoadROM(struct mGUIRunner* runner) {
@@ -488,6 +502,7 @@ void mPSP2Unpaused(struct mGUIRunner* runner) {
 	mCoreConfigGetBoolValue(&runner->config, "interframeBlending", &interframeBlending);
 	mCoreConfigGetBoolValue(&runner->config, "sgb.borderCrop", &sgbCrop);
 	mCoreConfigGetBoolValue(&runner->config, "filtering", &blurry);
+	_updateTextureFilters();
 }
 
 void mPSP2Teardown(struct mGUIRunner* runner) {
@@ -579,8 +594,6 @@ void _drawTex(vita2d_texture* t, unsigned width, unsigned height, bool faded, bo
 		scaley = 544.0f / height;
 		break;
 	}
-	vita2d_texture_set_filters(t, SCE_GXM_TEXTURE_FILTER_LINEAR,
-	                           blurry ? SCE_GXM_TEXTURE_FILTER_LINEAR : SCE_GXM_TEXTURE_FILTER_POINT);
 	if (blurry) {
 		// Needed to avoid bleed from off-screen portion of texture
 		unsigned i;
