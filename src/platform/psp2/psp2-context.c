@@ -98,6 +98,8 @@ static unsigned ccSetting = CC_OFF;
 static unsigned ccType = CC_OFF;
 static bool colorCorrectionEnabled = false;
 static uint32_t* ccLUT = NULL;
+static uint32_t* ccScratch[2] = { NULL, NULL };
+static size_t ccScratchSize = 0;
 static bool texCorrected[2] = { false, false };
 static SceTouchPanelInfo panelInfo[SCE_TOUCH_PORT_MAX_NUM];
 
@@ -146,6 +148,8 @@ static struct mPSP2AudioContext {
 void mPSP2MapKey(struct mInputMap* map, int pspKey, int key) {
 	mInputBindKey(map, PSP2_INPUT, __builtin_ctz(pspKey), key);
 }
+
+static void* _coreVideoTarget(int idx);
 
 static void _initColorCorrection(void) {
 	colorCorrectionEnabled = false;
@@ -236,19 +240,28 @@ static void _refreshColorCorrection(struct mGUIRunner* runner) {
 	}
 	ccType = resolved;
 	_initColorCorrection();
+	runner->core->setVideoBuffer(runner->core, _coreVideoTarget(currentTex), 256);
 }
 
-static void _applyColorCorrection(vita2d_texture* t, unsigned width, unsigned height) {
-	uint32_t* px = vita2d_texture_get_datap(t);
+static void _applyColorCorrection(const uint32_t* src, vita2d_texture* dst, unsigned width, unsigned height) {
+	uint32_t* dpx = vita2d_texture_get_datap(dst);
 	unsigned y, x;
 	for (y = 0; y < height; ++y) {
-		uint32_t* row = px + y * 256;
+		const uint32_t* srow = src + y * 256;
+		uint32_t* drow = dpx + y * 256;
 		for (x = 0; x < width; ++x) {
-			uint32_t v = row[x];
+			uint32_t v = srow[x];
 			unsigned idx = ((v & 0xF8) >> 3) | ((v & 0xF800) >> 6) | ((v & 0xF80000) >> 9);
-			row[x] = (v & 0xFF000000) | ccLUT[idx];
+			drow[x] = ccLUT[idx];
 		}
 	}
+}
+
+static void* _coreVideoTarget(int idx) {
+	if (colorCorrectionEnabled && ccScratch[idx]) {
+		return ccScratch[idx];
+	}
+	return vita2d_texture_get_datap(tex[idx]);
 }
 
 static void _updateTextureFilters(void) {
@@ -504,7 +517,17 @@ void mPSP2Setup(struct mGUIRunner* runner) {
 	memset(vita2d_texture_get_datap(tex[0]), 0xFF, 256 * toPow2(height) * 4);
 	memset(vita2d_texture_get_datap(tex[1]), 0xFF, 256 * toPow2(height) * 4);
 
-	runner->core->setVideoBuffer(runner->core, vita2d_texture_get_datap(tex[currentTex]), 256);
+	ccScratchSize = 256 * toPow2(height) * 4;
+	ccScratch[0] = malloc(ccScratchSize);
+	ccScratch[1] = malloc(ccScratchSize);
+	if (ccScratch[0]) {
+		memset(ccScratch[0], 0xFF, ccScratchSize);
+	}
+	if (ccScratch[1]) {
+		memset(ccScratch[1], 0xFF, ccScratchSize);
+	}
+
+	runner->core->setVideoBuffer(runner->core, _coreVideoTarget(currentTex), 256);
 	runner->core->setAudioBufferSize(runner->core, PSP2_SAMPLES);
 	mAudioBufferInit(&audioContext.buffer, PSP2_AUDIO_BUFFER_SIZE, 2);
 	mAudioResamplerInit(&audioContext.resampler, mINTERPOLATOR_COSINE);
@@ -667,6 +690,10 @@ void mPSP2Teardown(struct mGUIRunner* runner) {
 	vita2d_free_texture(screenshot);
 	free(ccLUT);
 	ccLUT = NULL;
+	free(ccScratch[0]);
+	free(ccScratch[1]);
+	ccScratch[0] = NULL;
+	ccScratch[1] = NULL;
 	colorCorrectionEnabled = false;
 	frameLimiter = true;
 }
@@ -789,7 +816,7 @@ void mPSP2Swap(struct mGUIRunner* runner) {
 	if (frameAvailable) {
 		currentTex = !currentTex;
 		texCorrected[currentTex] = false;
-		runner->core->setVideoBuffer(runner->core, vita2d_texture_get_datap(tex[currentTex]), 256);
+		runner->core->setVideoBuffer(runner->core, _coreVideoTarget(currentTex), 256);
 	}
 }
 
@@ -797,12 +824,12 @@ void mPSP2Draw(struct mGUIRunner* runner, bool faded) {
 	unsigned width, height;
 	runner->core->currentVideoSize(runner->core, &width, &height);
 	if (colorCorrectionEnabled) {
-		if (!texCorrected[currentTex]) {
-			_applyColorCorrection(tex[currentTex], width, height);
+		if (!texCorrected[currentTex] && ccScratch[currentTex]) {
+			_applyColorCorrection(ccScratch[currentTex], tex[currentTex], width, height);
 			texCorrected[currentTex] = true;
 		}
-		if (interframeBlending && !texCorrected[!currentTex]) {
-			_applyColorCorrection(tex[!currentTex], width, height);
+		if (interframeBlending && !texCorrected[!currentTex] && ccScratch[!currentTex]) {
+			_applyColorCorrection(ccScratch[!currentTex], tex[!currentTex], width, height);
 			texCorrected[!currentTex] = true;
 		}
 	}
