@@ -204,6 +204,19 @@ int main() {
 					"Back",
 				},
 				.nStates = 3
+			},
+			{
+				.title = "Color correction",
+				.data = GUI_V_S("colorCorrection"),
+				.submenu = 0,
+				.state = 0,
+				.validStates = (const char*[]) {
+					"Off",
+					"GBA",
+					"GBC",
+					"Auto",
+				},
+				.nStates = 4
 			}
 		},
 		.keySources = (struct GUIInputKeys[]) {
@@ -232,7 +245,7 @@ int main() {
 			},
 			{ .id = 0 }
 		},
-		.nConfigExtra = 3,
+		.nConfigExtra = 4,
 		.setup = mPSP2Setup,
 		.teardown = mPSP2Teardown,
 		.gameLoaded = mPSP2LoadROM,

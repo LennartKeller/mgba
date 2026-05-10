@@ -37,7 +37,43 @@
 
 #include <vita2d.h>
 
+#include <math.h>
+
 #define CDRAM_ALIGN 0x40000
+
+#define CC_TARGET_GAMMA   2.2f
+#define CC_RGB_MAX        31.0f
+
+#define GBA_CC_LUM        0.94f
+#define GBA_CC_R          0.82f
+#define GBA_CC_G          0.665f
+#define GBA_CC_B          0.73f
+#define GBA_CC_RG         0.125f
+#define GBA_CC_RB         0.195f
+#define GBA_CC_GR         0.24f
+#define GBA_CC_GB         0.075f
+#define GBA_CC_BR        -0.06f
+#define GBA_CC_BG         0.21f
+#define GBA_CC_GAMMA_ADJ  1.0f
+
+#define GBC_CC_LUM        0.94f
+#define GBC_CC_R          0.82f
+#define GBC_CC_G          0.665f
+#define GBC_CC_B          0.73f
+#define GBC_CC_RG         0.125f
+#define GBC_CC_RB         0.195f
+#define GBC_CC_GR         0.24f
+#define GBC_CC_GB         0.075f
+#define GBC_CC_BR        -0.06f
+#define GBC_CC_BG         0.21f
+#define GBC_CC_GAMMA_ADJ -0.5f
+
+enum {
+	CC_OFF = 0,
+	CC_GBA = 1,
+	CC_GBC = 2,
+	CC_AUTO = 3,
+};
 
 mLOG_DECLARE_CATEGORY(GUI_PSP2);
 mLOG_DEFINE_CATEGORY(GUI_PSP2, "Vita", "gui.psp2");
@@ -58,6 +94,11 @@ static double fpsRatio = 1;
 static bool interframeBlending = false;
 static bool sgbCrop = false;
 static bool blurry = false;
+static unsigned ccSetting = CC_OFF;
+static unsigned ccType = CC_OFF;
+static bool colorCorrectionEnabled = false;
+static uint32_t* ccLUT = NULL;
+static bool texCorrected[2] = { false, false };
 static SceTouchPanelInfo panelInfo[SCE_TOUCH_PORT_MAX_NUM];
 
 static struct mSceRotationSource {
@@ -104,6 +145,110 @@ static struct mPSP2AudioContext {
 
 void mPSP2MapKey(struct mInputMap* map, int pspKey, int key) {
 	mInputBindKey(map, PSP2_INPUT, __builtin_ctz(pspKey), key);
+}
+
+static void _initColorCorrection(void) {
+	colorCorrectionEnabled = false;
+	texCorrected[0] = false;
+	texCorrected[1] = false;
+
+	if (ccType == CC_OFF) {
+		return;
+	}
+
+	float ccLum, ccR, ccG, ccB, ccRG, ccRB, ccGR, ccGB, ccBR, ccBG, adjustedGamma;
+	switch (ccType) {
+	case CC_GBA:
+		ccLum = GBA_CC_LUM; ccR = GBA_CC_R; ccG = GBA_CC_G; ccB = GBA_CC_B;
+		ccRG = GBA_CC_RG; ccRB = GBA_CC_RB; ccGR = GBA_CC_GR;
+		ccGB = GBA_CC_GB; ccBR = GBA_CC_BR; ccBG = GBA_CC_BG;
+		adjustedGamma = CC_TARGET_GAMMA + GBA_CC_GAMMA_ADJ;
+		break;
+	case CC_GBC:
+		ccLum = GBC_CC_LUM; ccR = GBC_CC_R; ccG = GBC_CC_G; ccB = GBC_CC_B;
+		ccRG = GBC_CC_RG; ccRB = GBC_CC_RB; ccGR = GBC_CC_GR;
+		ccGB = GBC_CC_GB; ccBR = GBC_CC_BR; ccBG = GBC_CC_BG;
+		adjustedGamma = CC_TARGET_GAMMA + GBC_CC_GAMMA_ADJ;
+		break;
+	default:
+		return;
+	}
+
+	if (!ccLUT) {
+		ccLUT = malloc((1 << 15) * sizeof(uint32_t));
+		if (!ccLUT) {
+			return;
+		}
+	}
+
+	const float displayGammaInv = 1.0f / CC_TARGET_GAMMA;
+	const float rgbMaxInv = 1.0f / CC_RGB_MAX;
+
+	unsigned color;
+	for (color = 0; color < (1 << 15); ++color) {
+		unsigned r = color & 0x1F;
+		unsigned g = (color >> 5) & 0x1F;
+		unsigned b = (color >> 10) & 0x1F;
+		float rF = powf((float) r * rgbMaxInv, adjustedGamma);
+		float gF = powf((float) g * rgbMaxInv, adjustedGamma);
+		float bF = powf((float) b * rgbMaxInv, adjustedGamma);
+		float rC = ccLum * (ccR * rF + ccGR * gF + ccBR * bF);
+		float gC = ccLum * (ccRG * rF + ccG * gF + ccBG * bF);
+		float bC = ccLum * (ccRB * rF + ccGB * gF + ccB * bF);
+		if (rC < 0.0f) rC = 0.0f;
+		if (gC < 0.0f) gC = 0.0f;
+		if (bC < 0.0f) bC = 0.0f;
+		rC = powf(rC, displayGammaInv);
+		gC = powf(gC, displayGammaInv);
+		bC = powf(bC, displayGammaInv);
+		if (rC > 1.0f) rC = 1.0f;
+		if (gC > 1.0f) gC = 1.0f;
+		if (bC > 1.0f) bC = 1.0f;
+		unsigned r8 = (unsigned) (rC * 255.0f + 0.5f);
+		unsigned g8 = (unsigned) (gC * 255.0f + 0.5f);
+		unsigned b8 = (unsigned) (bC * 255.0f + 0.5f);
+		ccLUT[color] = r8 | (g8 << 8) | (b8 << 16);
+	}
+
+	colorCorrectionEnabled = true;
+}
+
+static void _refreshColorCorrection(struct mGUIRunner* runner) {
+	unsigned resolved = ccSetting;
+	if (resolved == CC_AUTO) {
+		resolved = CC_OFF;
+#ifdef M_CORE_GBA
+		if (runner->core->platform(runner->core) == mPLATFORM_GBA) {
+			resolved = CC_GBA;
+		}
+#endif
+#ifdef M_CORE_GB
+		if (resolved == CC_OFF && runner->core->platform(runner->core) == mPLATFORM_GB) {
+			struct GB* gb = runner->core->board;
+			if (gb->model == GB_MODEL_CGB) {
+				resolved = CC_GBC;
+			}
+		}
+#endif
+	}
+	if (resolved == ccType && (resolved == CC_OFF || colorCorrectionEnabled)) {
+		return;
+	}
+	ccType = resolved;
+	_initColorCorrection();
+}
+
+static void _applyColorCorrection(vita2d_texture* t, unsigned width, unsigned height) {
+	uint32_t* px = vita2d_texture_get_datap(t);
+	unsigned y, x;
+	for (y = 0; y < height; ++y) {
+		uint32_t* row = px + y * 256;
+		for (x = 0; x < width; ++x) {
+			uint32_t v = row[x];
+			unsigned idx = ((v & 0xF8) >> 3) | ((v & 0xF800) >> 6) | ((v & 0xF80000) >> 9);
+			row[x] = (v & 0xFF000000) | ccLUT[idx];
+		}
+	}
 }
 
 static void _updateTextureFilters(void) {
@@ -403,6 +548,9 @@ void mPSP2Setup(struct mGUIRunner* runner) {
 	mCoreConfigGetBoolValue(&runner->config, "sgb.borderCrop", &sgbCrop);
 	mCoreConfigGetBoolValue(&runner->config, "filtering", &blurry);
 	_updateTextureFilters();
+	if (mCoreConfigGetUIntValue(&runner->config, "colorCorrection", &mode) && mode <= CC_AUTO) {
+		ccSetting = mode;
+	}
 }
 
 void mPSP2LoadROM(struct mGUIRunner* runner) {
@@ -426,6 +574,7 @@ void mPSP2LoadROM(struct mGUIRunner* runner) {
 	}
 
 	mCoreConfigGetBoolValue(&runner->config, "interframeBlending", &interframeBlending);
+	_refreshColorCorrection(runner);
 
 	MutexInit(&audioContext.mutex);
 	ConditionInit(&audioContext.cond);
@@ -503,6 +652,10 @@ void mPSP2Unpaused(struct mGUIRunner* runner) {
 	mCoreConfigGetBoolValue(&runner->config, "sgb.borderCrop", &sgbCrop);
 	mCoreConfigGetBoolValue(&runner->config, "filtering", &blurry);
 	_updateTextureFilters();
+	if (mCoreConfigGetUIntValue(&runner->config, "colorCorrection", &mode) && mode <= CC_AUTO) {
+		ccSetting = mode;
+	}
+	_refreshColorCorrection(runner);
 }
 
 void mPSP2Teardown(struct mGUIRunner* runner) {
@@ -512,6 +665,9 @@ void mPSP2Teardown(struct mGUIRunner* runner) {
 	vita2d_free_texture(tex[0]);
 	vita2d_free_texture(tex[1]);
 	vita2d_free_texture(screenshot);
+	free(ccLUT);
+	ccLUT = NULL;
+	colorCorrectionEnabled = false;
 	frameLimiter = true;
 }
 
@@ -632,6 +788,7 @@ void mPSP2Swap(struct mGUIRunner* runner) {
 	}
 	if (frameAvailable) {
 		currentTex = !currentTex;
+		texCorrected[currentTex] = false;
 		runner->core->setVideoBuffer(runner->core, vita2d_texture_get_datap(tex[currentTex]), 256);
 	}
 }
@@ -639,6 +796,16 @@ void mPSP2Swap(struct mGUIRunner* runner) {
 void mPSP2Draw(struct mGUIRunner* runner, bool faded) {
 	unsigned width, height;
 	runner->core->currentVideoSize(runner->core, &width, &height);
+	if (colorCorrectionEnabled) {
+		if (!texCorrected[currentTex]) {
+			_applyColorCorrection(tex[currentTex], width, height);
+			texCorrected[currentTex] = true;
+		}
+		if (interframeBlending && !texCorrected[!currentTex]) {
+			_applyColorCorrection(tex[!currentTex], width, height);
+			texCorrected[!currentTex] = true;
+		}
+	}
 	if (interframeBlending) {
 		_drawTex(tex[!currentTex], width, height, faded, false);
 	}
